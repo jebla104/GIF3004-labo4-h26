@@ -150,6 +150,9 @@ static int pollClavier(void *arg){
     // TODO
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
+
+    int ligne, colonne, val, ret;
+    unsigned long bitmapEcriture, bitmapLecture;
     
     
     printk(KERN_INFO "SETR_CLAVIER : Poll clavier declenche! \n");
@@ -165,6 +168,44 @@ static int pollClavier(void *arg){
       // 2) Lit la valeur des lignes d'entrée
       // 3) Selon ces valeurs et le contenu de dernierEtat, détermine si une nouvelle touche a été pressée
       // 4) Met à jour le buffer et dernierEtat en s'assurant d'éviter les race conditions avec le reste du module
+
+      for (ligne = 0; ligne < NOMBRE_LIGNES; ligne++) {
+        bitmapEcriture = 1 << ligne;
+
+        ret = gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+        if (ret < 0) {
+            printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_set_array_value \n");
+            return ret;
+        }
+
+        ret = gpiod_get_array_value(gpioLecture->ndescs, gpioLecture->desc, gpioLecture->info, &bitmapLecture);
+        if (ret < 0) {
+            printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array_value \n");
+            return ret;
+        }
+
+        for (colonne = 0; colonne < NOMBRE_COLONNES; colonne++) {
+            val = (bitmapLecture >> colonne) & 1;
+
+            if (val == 1 && dernierEtat[ligne][colonne] == 0) {
+                // nouvelle touche
+                mutex_lock(&sync);
+
+                data[posCouranteEcriture] = valeursClavier[ligne][colonne];
+                posCouranteEcriture = (posCouranteEcriture + 1) % TAILLE_BUFFER;
+
+                mutex_unlock(&sync);
+
+                printk(KERN_INFO "SETR_CLAVIER : Touche detectee : %c\n", valeursClavier[ligne][colonne]);
+                printk(KERN_INFO "SETR_CLAVIER : posCouranteEcriture=%zu \n", posCouranteEcriture);
+
+                dernierEtat[ligne][colonne] = 1;
+            } else if (val == 0 && dernierEtat[ligne][colonne] == 1) {
+                // touche relâchée
+                dernierEtat[ligne][colonne] = 0;
+            }
+        }
+      }
 
 
       set_current_state(TASK_INTERRUPTIBLE); // On indique qu'on peut être interrompu
@@ -220,7 +261,32 @@ static int __init setrclavier_init(void){
     //
     // Vous devez également initialiser le mutex de synchronisation.
 
+    gpiod_add_lookup_table(&gpios_table);
 
+    gpioLecture = gpiod_get_array(setrDevice, "lecture", GPIOD_IN);
+    if (IS_ERR(gpioLecture)) {
+        // faut remove tout ce qu'on a init
+        gpiod_remove_lookup_table(&gpios_table);
+        device_destroy(setrClasse, MKDEV(majorNumber, 0));
+        class_destroy(setrClasse);
+        unregister_chrdev(majorNumber, DEV_NAME);
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioLecture) \n");
+        return PTR_ERR(gpioLecture);
+    }
+
+    gpioEcriture = gpiod_get_array(setrDevice, "ecriture", GPIOD_OUT_LOW);
+    if (IS_ERR(gpioEcriture)) {
+        // faut remove tout ce qu'on a init
+        gpiod_remove_lookup_table(&gpios_table);
+        gpiod_put_array(gpioLecture);
+        device_destroy(setrClasse, MKDEV(majorNumber, 0));
+        class_destroy(setrClasse);
+        unregister_chrdev(majorNumber, DEV_NAME);
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioEcriture) \n");
+        return PTR_ERR(gpioEcriture);
+    }
+
+    mutex_init(&sync);
 
     // Le mutex devrait avoir été initialisé avant d'appeler la ligne suivante!
     task = kthread_run(pollClavier, NULL, "Thread_polling_clavier");
@@ -243,6 +309,12 @@ static void __exit setrclavier_exit(void){
     // Écrivez le code permettant de relâcher (libérer) les GPIO
     // N'oubliez pas également de retirer la table de correspondances avec
     // gpiod_remove_lookup_table
+
+    gpiod_put_array(gpioLecture);
+    gpiod_put_array(gpioEcriture);
+    gpiod_remove_lookup_table(&gpios_table);
+
+    mutex_destroy(&sync);
 
     // On retire correctement les différentes composantes du pilote
     device_destroy(setrClasse, MKDEV(majorNumber, 0));
@@ -270,6 +342,9 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
 
+    size_t disponible, aCopier, premierePartie;
+    int err;
+
     // TODO
     // Implémentez cette fonction de lecture
     // Celle-ci doit copier N caractères dans le buffer fourni en paramètre, N étant le minimum
@@ -283,6 +358,39 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // posCouranteLecture, et vous devez gérer ce cas sans perdre de caractères et en respectant les
     // autres conditions (par exemple, ne jamais copier plus que len caractères).
 
+    mutex_lock(&sync);
+
+    if (posCouranteEcriture >= posCouranteLecture)
+        disponible = posCouranteEcriture - posCouranteLecture;
+    else
+        disponible = TAILLE_BUFFER - posCouranteLecture + posCouranteEcriture;
+
+    aCopier = (len < disponible) ? len : disponible;
+
+    if (aCopier == 0) {
+        mutex_unlock(&sync);
+        return 0;
+    }
+
+    if (posCouranteLecture + aCopier <= TAILLE_BUFFER) {
+        err = copy_to_user(buffer, &data[posCouranteLecture], aCopier);
+    } else {
+        premierePartie = TAILLE_BUFFER - posCouranteLecture;
+        err = copy_to_user(buffer, &data[posCouranteLecture], premierePartie);
+        if (!err)
+            err = copy_to_user(buffer + premierePartie, &data[0], aCopier - premierePartie);
+    }
+
+    if (err) {
+        mutex_unlock(&sync);
+        return -EFAULT;
+    }
+
+    posCouranteLecture = (posCouranteLecture + aCopier) % TAILLE_BUFFER;
+
+    mutex_unlock(&sync);
+
+    return aCopier;
 }
 
 // On enregistre les fonctions d'initialisation et de destruction
