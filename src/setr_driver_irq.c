@@ -142,10 +142,11 @@ static unsigned int irqId[NOMBRE_COLONNES];
 
 
 
-void func_tasklet_polling(unsigned long paramf){
-    // TODO
+static void func_tasklet_polling(unsigned long paramf){
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
+    int ligne, colonne, val;
+    unsigned long bitmapEcriture, bitmapLecture;
     
     // Cette fonction est le coeur d'exécution du tasklet
     // Elle fait à peu de choses près la même chose que le kthread
@@ -158,8 +159,6 @@ void func_tasklet_polling(unsigned long paramf){
     // Important: Vous DEVEZ utiliser l'API "GPIO Descriptor Consumer Interface"
     // (ref : https://www.kernel.org/doc/html/v6.1/driver-api/gpio/consumer.html)
     
-
-    // TODO
     // Écrivez le code permettant
     // 1) D'éviter le traitement de nouvelles interruptions : nous allons changer
     //      les niveaux des broches de lecture, il ne faut pas que ce soit interprété
@@ -177,6 +176,40 @@ void func_tasklet_polling(unsigned long paramf){
     // cette fonction n'a pas à être exécutée en boucle, mais vous ne pouvez _pas_
     // faire un msleep ou une autre fonction similaire dans un tasklet!
 
+
+    atomic_set(&irqEnCours, 1);
+
+    for (ligne = 0; ligne < NOMBRE_LIGNES; ligne++) {
+        bitmapEcriture = 1 << ligne;
+
+        gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+
+        gpiod_get_array_value(gpioLecture->ndescs, gpioLecture->desc, gpioLecture->info, &bitmapLecture);
+
+        for (colonne = 0; colonne < NOMBRE_COLONNES; colonne++) {
+            val = (bitmapLecture >> colonne) & 1;
+
+            if (val == 1 && dernierEtat[ligne][colonne] == 0) {
+                mutex_lock(&sync);
+                data[posCouranteEcriture] = valeursClavier[ligne][colonne];
+                posCouranteEcriture = (posCouranteEcriture + 1) % TAILLE_BUFFER;
+
+                mutex_unlock(&sync);
+
+                printk(KERN_INFO "SETR_CLAVIER_IRQ : Touche detectee : %c\n", valeursClavier[ligne][colonne]);
+                printk(KERN_INFO "SETR_CLAVIER_IRQ : posCouranteEcriture=%zu \n", posCouranteEcriture);
+
+                dernierEtat[ligne][colonne] = 1;
+            } else if (val == 0 && dernierEtat[ligne][colonne] == 1) {
+                dernierEtat[ligne][colonne] = 0;
+            }
+        }
+    }
+
+    bitmapEcriture = (1 << NOMBRE_LIGNES) - 1;
+    gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+
+    atomic_set(&irqEnCours, 0);
 }
 
 // On déclare le tasklet avec la macro DECLARE_TASKLET_OLD
@@ -194,7 +227,9 @@ static irqreturn_t  setr_irq_handler(unsigned int irq, void *dev_id){
     //
     // N'oubliez pas que ce IRQ handler devrait en faire le _minimum_ et déférer le
     // plus possible le traitement au tasklet!
-    // TODO
+
+    if (atomic_read(&irqEnCours) == 0)
+        tasklet_schedule(&tasklet_polling);
 
     // On retourne en indiquant qu'on a géré l'interruption
     return (irqreturn_t) IRQ_HANDLED;
@@ -206,6 +241,8 @@ static int __init setrclavier_init(void){
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
     int ok;
+    int irqno;
+    int ligne;
     printk(KERN_INFO "SETR_CLAVIER_IRQ : Initialisation du driver commencee\n");
 
     majorNumber = register_chrdev(0, DEV_NAME, &fops);
@@ -253,19 +290,51 @@ static int __init setrclavier_init(void){
     //
     // Vous devez également initialiser le mutex de synchronisation.
 
-    ok = request_irq(irqno,                 // Le numéro de l'interruption, obtenue avec gpio_to_irq
-         (irq_handler_t) setr_irq_handler,  // Pointeur vers la routine de traitement de l'interruption
-         IRQF_TRIGGER_RISING,               // On veut une interruption sur le front montant (lorsque le bouton est pressé)
-         "setr_irq_handler",                // Le nom de notre interruption
-         NULL);                             // Paramètre supplémentaire inutile pour vous
-    if(ok != 0){
-        printk(KERN_ALERT "Erreur (%d) lors de l'enregistrement IRQ #{%d}!\n", ok, irqno);
+    gpiod_add_lookup_table(&gpios_table);
+
+    gpioLecture = gpiod_get_array(setrDevice, "lecture", GPIOD_IN);
+    if (IS_ERR(gpioLecture)) {
+        // faut remove tout ce qu'on a init
+        gpiod_remove_lookup_table(&gpios_table);
         device_destroy(setrClasse, MKDEV(majorNumber, 0));
         class_destroy(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
-        return ok;
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioLecture) \n");
+        return PTR_ERR(gpioLecture);
     }
 
+    gpioEcriture = gpiod_get_array(setrDevice, "ecriture", GPIOD_OUT_LOW);
+    if (IS_ERR(gpioEcriture)) {
+        // faut remove tout ce qu'on a init
+        gpiod_put_array(gpioLecture);
+        gpiod_remove_lookup_table(&gpios_table);
+        device_destroy(setrClasse, MKDEV(majorNumber, 0));
+        class_destroy(setrClasse);
+        unregister_chrdev(majorNumber, DEV_NAME);
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioEcriture) \n");
+        return PTR_ERR(gpioEcriture);
+    }
+
+    for (ligne = 0; ligne < gpioLecture->ndescs; ligne++) {
+        irqno = gpiod_to_irq(gpioLecture->desc[ligne]);
+        irqId[ligne] = irqno;
+
+        ok = request_irq(irqno,                 // Le numéro de l'interruption, obtenue avec gpio_to_irq
+            (irq_handler_t) setr_irq_handler,  // Pointeur vers la routine de traitement de l'interruption
+            IRQF_TRIGGER_RISING,               // On veut une interruption sur le front montant (lorsque le bouton est pressé)
+            "setr_irq_handler",                // Le nom de notre interruption
+            NULL);                              // Paramètre supplémentaire inutile pour vous
+        
+        if(ok != 0){
+            printk(KERN_ALERT "SETR_CLAVIER : Erreur (%d) lors de l'enregistrement IRQ #{%d}!\n", ok, irqno);
+            device_destroy(setrClasse, MKDEV(majorNumber, 0));
+            class_destroy(setrClasse);
+            unregister_chrdev(majorNumber, DEV_NAME);
+            return ok;
+        }
+    }
+
+    mutex_init(&sync);
 
     printk(KERN_INFO "SETR_CLAVIER_IRQ : Fin de l'Initialisation!\n"); // Made it! device was initialized
 
@@ -277,6 +346,7 @@ static void __exit setrclavier_exit(void){
     // TODO
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
+    int ligne;
 
     // TODO
     // Écrivez le code permettant de relâcher (libérer) les GPIO
@@ -285,6 +355,15 @@ static void __exit setrclavier_exit(void){
     // 2) Libérez les GPIO obtenus dans l'initialisation
     // 3) Retirez la table de correspondances avec gpiod_remove_lookup_table
 
+    for (ligne = 0; ligne < gpioLecture->ndescs; ligne++) {
+        free_irq(irqId[ligne], NULL);
+    }
+
+    gpiod_put_array(gpioLecture);
+    gpiod_put_array(gpioEcriture);
+    gpiod_remove_lookup_table(&gpios_table);
+
+    mutex_destroy(&sync);
 
     // On retire correctement les différentes composantes du pilote
     device_destroy(setrClasse, MKDEV(majorNumber, 0));
@@ -312,6 +391,9 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
 
+    size_t disponible, aCopier, premierePartie;
+    int err;
+
     // TODO
     // Implémentez cette fonction de lecture
     //
@@ -329,6 +411,40 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // revienne alors à 0. Il est donc tout à fait possible que posCouranteEcriture soit INFÉRIEUR à
     // posCouranteLecture, et vous devez gérer ce cas sans perdre de caractères et en respectant les
     // autres conditions (par exemple, ne jamais copier plus que len caractères).
+
+    mutex_lock(&sync);
+
+    if (posCouranteEcriture >= posCouranteLecture)
+        disponible = posCouranteEcriture - posCouranteLecture;
+    else
+        disponible = TAILLE_BUFFER - posCouranteLecture + posCouranteEcriture;
+
+    aCopier = (len < disponible) ? len : disponible;
+
+    if (aCopier == 0) {
+        mutex_unlock(&sync);
+        return 0;
+    }
+
+    if (posCouranteLecture + aCopier <= TAILLE_BUFFER) {
+        err = copy_to_user(buffer, &data[posCouranteLecture], aCopier);
+    } else {
+        premierePartie = TAILLE_BUFFER - posCouranteLecture;
+        err = copy_to_user(buffer, &data[posCouranteLecture], premierePartie);
+        if (!err)
+            err = copy_to_user(buffer + premierePartie, &data[0], aCopier - premierePartie);
+    }
+
+    if (err) {
+        mutex_unlock(&sync);
+        return -EFAULT;
+    }
+
+    posCouranteLecture = (posCouranteLecture + aCopier) % TAILLE_BUFFER;
+
+    mutex_unlock(&sync);
+
+    return aCopier;
 }
 
 

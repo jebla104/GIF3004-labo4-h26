@@ -277,8 +277,8 @@ static int __init setrclavier_init(void){
     gpioEcriture = gpiod_get_array(setrDevice, "ecriture", GPIOD_OUT_LOW);
     if (IS_ERR(gpioEcriture)) {
         // faut remove tout ce qu'on a init
-        gpiod_remove_lookup_table(&gpios_table);
         gpiod_put_array(gpioLecture);
+        gpiod_remove_lookup_table(&gpios_table);
         device_destroy(setrClasse, MKDEV(majorNumber, 0));
         class_destroy(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
