@@ -399,6 +399,6 @@ module_exit(setrclavier_exit);
 
 // Description du module
 MODULE_LICENSE("GPL");            // Licence : laissez "GPL"
-MODULE_AUTHOR("Vous!");           // Vos noms
+MODULE_AUTHOR("Jérémie BLAIS et Léo DUMONT");           // Vos noms
 MODULE_DESCRIPTION("Lecteur de clavier externe par polling");  // Description du module
 MODULE_VERSION("2.0");            // Numéro de version
