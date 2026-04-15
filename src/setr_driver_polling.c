@@ -28,7 +28,7 @@
 #include <linux/kthread.h>          // Utilisation des threads noyau
 #include <linux/delay.h>            // Fonctions d'attente, en particulier msleep
 #include <linux/string.h>           // Différentes fonctions de manipulation de string, plus memset et memcpy
-#include <linux/mutex.h>            // Mutex et synchronisation
+#include <linux/spinlock.h>
 #include <linux/interrupt.h>        // Définit les symboles pour les interruptions et les tasklets
 #include <linux/atomic.h>           // Synchronisation par valeur atomique
 
@@ -66,11 +66,12 @@ static int    majorNumber;                 // Numéro donné par le noyau à not
 static char   data[TAILLE_BUFFER] = {0};   // Buffer circulaire contenant les caractères du clavier
 static size_t posCouranteLecture = 0;      // Position de la prochaine lecture dans le buffer
 static size_t posCouranteEcriture = 0;     // Position de la prochaine écriture dans le buffer
+static size_t nbElements = 0;
 
 static struct class*  setrClasse  = NULL;  // Contiendra les informations sur la classe de notre pilote
 static struct device* setrDevice = NULL;   // Contiendra les informations sur le périphérique associé
 
-static struct mutex sync;                  // Mutex servant à synchroniser les accès au buffer
+static spinlock_t sync;
 static struct task_struct *task;           // Réfère au thread noyau qui sera lancé
 
 
@@ -152,7 +153,9 @@ static int pollClavier(void *arg){
     // un warning si une variable est déclarée après toute ligne de code)
 
     int ligne, colonne, val, ret;
+    unsigned long flags;
     unsigned long bitmapEcriture, bitmapLecture;
+    (void)arg;
     
     
     printk(KERN_INFO "SETR_CLAVIER : Poll clavier declenche! \n");
@@ -188,23 +191,31 @@ static int pollClavier(void *arg){
             val = (bitmapLecture >> colonne) & 1;
 
             if (val == 1 && dernierEtat[ligne][colonne] == 0) {
-                // nouvelle touche
-                mutex_lock(&sync);
-
+                spin_lock_irqsave(&sync, flags);
+                if (nbElements == TAILLE_BUFFER) {
+                    posCouranteLecture = (posCouranteLecture + 1) % TAILLE_BUFFER;
+                } else {
+                    nbElements++;
+                }
                 data[posCouranteEcriture] = valeursClavier[ligne][colonne];
                 posCouranteEcriture = (posCouranteEcriture + 1) % TAILLE_BUFFER;
-
-                mutex_unlock(&sync);
+                spin_unlock_irqrestore(&sync, flags);
 
                 printk(KERN_INFO "SETR_CLAVIER : Touche detectee : %c\n", valeursClavier[ligne][colonne]);
                 printk(KERN_INFO "SETR_CLAVIER : posCouranteEcriture=%zu \n", posCouranteEcriture);
 
                 dernierEtat[ligne][colonne] = 1;
             } else if (val == 0 && dernierEtat[ligne][colonne] == 1) {
-                // touche relâchée
                 dernierEtat[ligne][colonne] = 0;
             }
         }
+      }
+
+      bitmapEcriture = (1 << NOMBRE_LIGNES) - 1;
+      ret = gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+      if (ret < 0) {
+          printk(KERN_ALERT "SETR_CLAVIER : Erreur lors du rearmement des lignes d'ecriture \n");
+          return ret;
       }
 
 
@@ -221,6 +232,8 @@ static int __init setrclavier_init(void){
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
     
+    int ok;
+    unsigned long bitmapEcriture;
     printk(KERN_INFO "SETR_CLAVIER : Initialisation du driver commencee\n");
 
     // On enregistre notre pilote
@@ -233,18 +246,20 @@ static int __init setrclavier_init(void){
     // Création de la classe de périphérique
     setrClasse = class_create(CLS_NAME);
     if (IS_ERR(setrClasse)){
+        ok = PTR_ERR(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
         printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de la creation de la classe de peripherique\n");
-        return PTR_ERR(setrClasse);
+        return ok;
     }
 
     // Création du pilote de périphérique associé
     setrDevice = device_create(setrClasse, NULL, MKDEV(majorNumber, 0), NULL, DEV_NAME);
     if (IS_ERR(setrDevice)){
+        ok = PTR_ERR(setrDevice);
         class_destroy(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
         printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de la creation du pilote de peripherique\n");
-        return PTR_ERR(setrDevice);
+        return ok;
     }
 
     // TODO
@@ -265,17 +280,19 @@ static int __init setrclavier_init(void){
 
     gpioLecture = gpiod_get_array(setrDevice, "lecture", GPIOD_IN);
     if (IS_ERR(gpioLecture)) {
+        ok = PTR_ERR(gpioLecture);
         // faut remove tout ce qu'on a init
         gpiod_remove_lookup_table(&gpios_table);
         device_destroy(setrClasse, MKDEV(majorNumber, 0));
         class_destroy(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
         printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioLecture) \n");
-        return PTR_ERR(gpioLecture);
+        return ok;
     }
 
     gpioEcriture = gpiod_get_array(setrDevice, "ecriture", GPIOD_OUT_LOW);
     if (IS_ERR(gpioEcriture)) {
+        ok = PTR_ERR(gpioEcriture);
         // faut remove tout ce qu'on a init
         gpiod_put_array(gpioLecture);
         gpiod_remove_lookup_table(&gpios_table);
@@ -283,13 +300,40 @@ static int __init setrclavier_init(void){
         class_destroy(setrClasse);
         unregister_chrdev(majorNumber, DEV_NAME);
         printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'appel a gpiod_get_array (gpioEcriture) \n");
-        return PTR_ERR(gpioEcriture);
+        return ok;
     }
 
-    mutex_init(&sync);
+    spin_lock_init(&sync);
+    posCouranteLecture = 0;
+    posCouranteEcriture = 0;
+    nbElements = 0;
+
+    bitmapEcriture = (1 << NOMBRE_LIGNES) - 1;
+    ok = gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+    if (ok < 0) {
+        gpiod_put_array(gpioEcriture);
+        gpiod_put_array(gpioLecture);
+        gpiod_remove_lookup_table(&gpios_table);
+        device_destroy(setrClasse, MKDEV(majorNumber, 0));
+        class_destroy(setrClasse);
+        unregister_chrdev(majorNumber, DEV_NAME);
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de l'armement des lignes d'ecriture\n");
+        return ok;
+    }
 
     // Le mutex devrait avoir été initialisé avant d'appeler la ligne suivante!
     task = kthread_run(pollClavier, NULL, "Thread_polling_clavier");
+    if (IS_ERR(task)) {
+        ok = PTR_ERR(task);
+        gpiod_put_array(gpioEcriture);
+        gpiod_put_array(gpioLecture);
+        gpiod_remove_lookup_table(&gpios_table);
+        device_destroy(setrClasse, MKDEV(majorNumber, 0));
+        class_destroy(setrClasse);
+        unregister_chrdev(majorNumber, DEV_NAME);
+        printk(KERN_ALERT "SETR_CLAVIER : Erreur lors de la creation du thread noyau\n");
+        return ok;
+    }
 
     printk(KERN_INFO "SETR_CLAVIER : Fin de l'Initialisation!\n"); // Made it! device was initialized
 
@@ -303,7 +347,8 @@ static void __exit setrclavier_exit(void){
     // un warning si une variable est déclarée après toute ligne de code)
 
     // On arrête le thread de lecture
-    kthread_stop(task);
+    if (task && !IS_ERR(task))
+        kthread_stop(task);
 
     // TODO
     // Écrivez le code permettant de relâcher (libérer) les GPIO
@@ -313,8 +358,6 @@ static void __exit setrclavier_exit(void){
     gpiod_put_array(gpioLecture);
     gpiod_put_array(gpioEcriture);
     gpiod_remove_lookup_table(&gpios_table);
-
-    mutex_destroy(&sync);
 
     // On retire correctement les différentes composantes du pilote
     device_destroy(setrClasse, MKDEV(majorNumber, 0));
@@ -342,8 +385,10 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
 
-    size_t disponible, aCopier, premierePartie;
+    size_t aCopier, i;
+    unsigned long flags;
     int err;
+    char tamponLocal[TAILLE_BUFFER];
 
     // TODO
     // Implémentez cette fonction de lecture
@@ -358,37 +403,23 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     // posCouranteLecture, et vous devez gérer ce cas sans perdre de caractères et en respectant les
     // autres conditions (par exemple, ne jamais copier plus que len caractères).
 
-    mutex_lock(&sync);
+    spin_lock_irqsave(&sync, flags);
 
-    if (posCouranteEcriture >= posCouranteLecture)
-        disponible = posCouranteEcriture - posCouranteLecture;
-    else
-        disponible = TAILLE_BUFFER - posCouranteLecture + posCouranteEcriture;
-
-    aCopier = (len < disponible) ? len : disponible;
-
-    if (aCopier == 0) {
-        mutex_unlock(&sync);
-        return 0;
+    aCopier = (len < nbElements) ? len : nbElements;
+    for (i = 0; i < aCopier; i++) {
+        tamponLocal[i] = data[(posCouranteLecture + i) % TAILLE_BUFFER];
     }
-
-    if (posCouranteLecture + aCopier <= TAILLE_BUFFER) {
-        err = copy_to_user(buffer, &data[posCouranteLecture], aCopier);
-    } else {
-        premierePartie = TAILLE_BUFFER - posCouranteLecture;
-        err = copy_to_user(buffer, &data[posCouranteLecture], premierePartie);
-        if (!err)
-            err = copy_to_user(buffer + premierePartie, &data[0], aCopier - premierePartie);
-    }
-
-    if (err) {
-        mutex_unlock(&sync);
-        return -EFAULT;
-    }
-
     posCouranteLecture = (posCouranteLecture + aCopier) % TAILLE_BUFFER;
+    nbElements -= aCopier;
 
-    mutex_unlock(&sync);
+    spin_unlock_irqrestore(&sync, flags);
+
+    if (aCopier == 0)
+        return 0;
+
+    err = copy_to_user(buffer, tamponLocal, aCopier);
+    if (err)
+        return -EFAULT;
 
     return aCopier;
 }
