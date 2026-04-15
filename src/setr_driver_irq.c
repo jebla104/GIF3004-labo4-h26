@@ -176,9 +176,6 @@ static void func_tasklet_polling(unsigned long paramf){
     // cette fonction n'a pas à être exécutée en boucle, mais vous ne pouvez _pas_
     // faire un msleep ou une autre fonction similaire dans un tasklet!
 
-
-    atomic_set(&irqEnCours, 1);
-
     for (ligne = 0; ligne < NOMBRE_LIGNES; ligne++) {
         bitmapEcriture = 1 << ligne;
 
@@ -228,7 +225,7 @@ static irqreturn_t  setr_irq_handler(unsigned int irq, void *dev_id){
     // N'oubliez pas que ce IRQ handler devrait en faire le _minimum_ et déférer le
     // plus possible le traitement au tasklet!
 
-    if (atomic_read(&irqEnCours) == 0)
+    if (atomic_cmpxchg(&irqEnCours, 0, 1) == 0)
         tasklet_schedule(&tasklet_polling);
 
     // On retourne en indiquant qu'on a géré l'interruption
