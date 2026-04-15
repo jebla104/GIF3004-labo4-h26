@@ -179,8 +179,6 @@ static void func_tasklet_polling(unsigned long paramf){
     // cette fonction n'a pas à être exécutée en boucle, mais vous ne pouvez _pas_
     // faire un msleep ou une autre fonction similaire dans un tasklet!
 
-    printk(KERN_INFO "SETR_CLAVIER_IRQ : Tasklet start \n");
-
     for (ligne = 0; ligne < NOMBRE_LIGNES; ligne++) {
         bitmapEcriture = 1 << ligne;
 
@@ -231,8 +229,6 @@ static void func_tasklet_polling(unsigned long paramf){
     }
 
     atomic_set(&irqEnCours, 0);
-
-    printk(KERN_INFO "SETR_CLAVIER_IRQ : Tasklet done \n");
 }
 
 // On déclare le tasklet avec la macro DECLARE_TASKLET_OLD
