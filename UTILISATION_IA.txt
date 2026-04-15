@@ -1,0 +1,58 @@
+Question 1 : Avez-vous utilisé un ou des outils d'IA pour ce laboratoire, même seulement en partie (oui/non)?
+
+oui
+
+Répondez aux questions suivantes seulement si vous avez répondu "oui" à la question précédente.
+
+Question 2 : Quels modèles (ex., Claude Opus, Gemini Pro, GPT-Codex, etc.)?
+
+GPT-5, Claude Opus
+
+Question 3 : Pour la réalisation de quelles tâches en particulier? Donnez un exemple de "prompt" utilisé et de résultat.
+
+Utilisé surtout pour la compréhension de certaines subtilités en lien avec la programmation en mode noyau, résolution de bogues, sauver du temps de recherche dans la documentation
+
+Prompt : 
+
+Give me a list of possible gpiod flags and their utility.
+
+Résultat :
+
+Here are the main gpiod flags used with gpiod_get / gpiod_get_array:
+
+Direction flags:
+
+- GPIOD_ASIS — don't change the direction, leave as-is
+
+- GPIOD_IN — configure as input
+
+- GPIOD_OUT_LOW — configure as output, initially low (0)
+
+- GPIOD_OUT_HIGH — configure as output, initially high (1)
+
+- GPIOD_OUT_LOW_OPEN_DRAIN — output low, open-drain mode
+
+- GPIOD_OUT_HIGH_OPEN_DRAIN — output high, open-drain mode
+
+Lookup table flags (5th argument of GPIO_LOOKUP_IDX):
+
+- GPIO_ACTIVE_HIGH — logical 1 = voltage high (normal)
+
+- GPIO_ACTIVE_LOW — logical 1 = voltage low (inverted logic)
+
+- GPIO_OPEN_DRAIN — pin is open-drain (can only pull low, needs external pull-up)
+
+- GPIO_OPEN_SOURCE — pin is open-source (can only pull high, needs external pull-down)
+
+- GPIO_PULL_UP — enable internal pull-up resistor
+
+- GPIO_PULL_DOWN — enable internal pull-down resistor
+
+- GPIO_PULL_DISABLE — disable internal pull resistor
+
+- GPIO_TRANSITORY — value may change due to external factors (debouncing hint)
+
+
+Question 4 : Avez-vous rencontré des problèmes lors de l'utilisation de l'IA (mauvaise compréhension des commandes fournies, résultats erronés, etc.)? Qu'avez-vous fait pour les régler?
+
+Pas vraiment
