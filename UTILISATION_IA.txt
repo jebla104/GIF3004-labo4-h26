@@ -52,6 +52,36 @@ Lookup table flags (5th argument of GPIO_LOOKUP_IDX):
 
 - GPIO_TRANSITORY — value may change due to external factors (debouncing hint)
 
+Egalement pour etre guide sur les documentations a utiliser en cas de soucis avec l'api kernel:
+
+Can you please tell me which documentations should i read to find issues and bad things done in our code please ? I want you to simply give the url and why its useful. Provide trustful documentations url from verified websites. I am debugging and trying to enhance my code.
+
+Linux GPIO Descriptor Consumer Interface
+https://www.kernel.org/doc/html/latest/driver-api/gpio/consumer.html
+Why: your driver uses gpiod_get_array, line reads/writes, and this is the core API you must apply correctly.
+
+Linux Generic IRQ and interrupt handlers
+https://www.kernel.org/doc/html/latest/core-api/genericirq.html
+Why: helps verify what should happen in the IRQ handler vs deferred work, trigger types, and registration/lifecycle.
+
+Bottom halves, tasklets, and deferred execution rules
+https://www.kernel.org/doc/html/latest/core-api/workqueue.html
+https://www.kernel.org/doc/html/latest/driver-api/basics.html
+Why: even if tasklets are older style, this explains what is safe or unsafe in deferred contexts and timing/scheduling behavior.
+
+Kernel locking and race-condition basics
+https://www.kernel.org/doc/html/latest/kernel-hacking/locking.html
+Why: duplicated events often come from synchronization mistakes between IRQ path, deferred path, and read path.
+
+Character device driver fundamentals
+https://www.kernel.org/doc/html/latest/core-api/kernel-api.html
+https://www.kernel.org/doc/html/latest/filesystems/vfs.html
+Why: confirms correct open/read/release behavior and user-buffer copy patterns.
+
+GPIO mapping tables and board lookup
+https://www.kernel.org/doc/html/latest/driver-api/gpio/board.html
+Why: your lookup table and index mapping need to be coherent with scan logic.
+
 
 Question 4 : Avez-vous rencontré des problèmes lors de l'utilisation de l'IA (mauvaise compréhension des commandes fournies, résultats erronés, etc.)? Qu'avez-vous fait pour les régler?
 
