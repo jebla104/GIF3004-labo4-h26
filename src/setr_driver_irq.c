@@ -145,7 +145,7 @@ static unsigned int irqId[NOMBRE_COLONNES];
 static void func_tasklet_polling(unsigned long paramf){
     // Déclarez _toutes_ vos variables locales ici (le module est compilé avec un standard générant
     // un warning si une variable est déclarée après toute ligne de code)
-    int ligne, colonne, val;
+    int ligne, colonne, val, ret;
     unsigned long bitmapEcriture, bitmapLecture;
     
     // Cette fonction est le coeur d'exécution du tasklet
@@ -176,12 +176,24 @@ static void func_tasklet_polling(unsigned long paramf){
     // cette fonction n'a pas à être exécutée en boucle, mais vous ne pouvez _pas_
     // faire un msleep ou une autre fonction similaire dans un tasklet!
 
+    printk(KERN_INFO "SETR_CLAVIER_IRQ : Tasklet start \n");
+
     for (ligne = 0; ligne < NOMBRE_LIGNES; ligne++) {
         bitmapEcriture = 1 << ligne;
 
-        gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+        ret = gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
+        if (ret < 0) {
+            printk(KERN_ALERT "SETR_CLAVIER_IRQ : Erreur lors de l'appel a gpiod_set_array_value \n");
+            atomic_set(&irqEnCours, 0);
+            return;
+        }
 
-        gpiod_get_array_value(gpioLecture->ndescs, gpioLecture->desc, gpioLecture->info, &bitmapLecture);
+        ret = gpiod_get_array_value(gpioLecture->ndescs, gpioLecture->desc, gpioLecture->info, &bitmapLecture);
+        if (ret < 0) {
+            printk(KERN_ALERT "SETR_CLAVIER_IRQ : Erreur lors de l'appel a gpiod_get_array_value \n");
+            atomic_set(&irqEnCours, 0);
+            return;
+        }
 
         for (colonne = 0; colonne < NOMBRE_COLONNES; colonne++) {
             val = (bitmapLecture >> colonne) & 1;
@@ -207,6 +219,8 @@ static void func_tasklet_polling(unsigned long paramf){
     gpiod_set_array_value(gpioEcriture->ndescs, gpioEcriture->desc, gpioEcriture->info, &bitmapEcriture);
 
     atomic_set(&irqEnCours, 0);
+
+    printk(KERN_INFO "SETR_CLAVIER_IRQ : Tasklet done \n");
 }
 
 // On déclare le tasklet avec la macro DECLARE_TASKLET_OLD
